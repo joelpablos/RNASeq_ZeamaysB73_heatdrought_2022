@@ -1,0 +1,2264 @@
+In this new analysis, several improvements were made:
+
+* Salmon V1.3 (instead of 0.9)
+ 
+ - use decoys at indexing, this makes sure that reads are not forced to gene models if it's gene models are not known yet
+ - selective alignment 
+ - make sure you set the right fragment library types (-a would work, but better double check that it did it rightly)
+
+* Using Selective alignment (--validateMappings)
+
+* Creating a full decoy-aware index (Concatenating the genome to the end of the transcriptome you want to index and populating the decoys.txt file with the chromosome names.)
+
+* Use multiqc v1.7
+
+handy commands:
+--------------
+continually inspect output (not errors) of a certain qsub output:
+
+tail -f cat script.sh.o*
+
+delete a whole line in nano:
+
+ctrl-K
+
+# 1. RNA-Seq Analysis
+## 1.1. extracting SRA's reads
+
+```{Bash engine.path="/bin/sh"}
+pwd #probably not needed
+```
+
+## 1.2. Counting reads
+
+Sanity check:
+```{Bash engine.path="/bin/sh"}
+#| echo: true
+#tryout
+zcat ../data/maize_heat/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_1.fastq.gz | echo $((`wc -l`/4))
+
+```
+
+```{Bash engine.path="/bin/sh"}
+#bulk
+
+#!/bin/bash
+touch readcounts_m_heat.txt
+for i in ../data/maize_heat/*.gz; do
+
+echo "${i}" >> readcounts_m_heat.txt #append
+zcat "${i}" | echo $((`wc -l`/4)) >> readcounts_m_heat.txt #append
+
+done
+
+#bulk
+
+#!/bin/bash
+touch readcounts_m_drought.txt
+for i in ../data/maize_drought/*.gz; do
+
+echo "${i}" >> readcounts_m_drought.txt #append
+zcat "${i}" | echo $((`wc -l`/4)) >> readcounts_m_drought.txt #append
+
+done
+```
+
+> qsub -l h_vmem=2G countreads.sh
+
+## 1.3. FastQC
+
+```{Bash engine.path="/bin/sh"}
+
+#!/bin/bash
+module load FastQC
+
+for i in ../data/maize_heat/*.gz; do
+
+echo "processing sample ${i}"
+
+fastqc "${i}" -o ../data/fastQC/ -t 12
+
+done
+
+#!/bin/bash
+module load FastQC
+
+for i in ../data/maize_drought/*.gz; do
+
+echo "processing sample ${i}"
+
+fastqc "${i}" -o ../data/fastQC/ -t 12
+
+done
+```
+
+> qsub -pe serial 12 -l h_vmem=2G fastqc_heat.sh
+
+## 1.4. MultiQC
+
+```{Bash engine.path="/bin/sh"}
+module load multiqc
+
+cd /scratch/diatomcomp/diatom_reproduction/Analysis_2021/mapping/Ccl
+
+multiqc fastQC
+```
+
+
+```{Bash engine.path="/bin/sh"}
+module load multiqc
+
+cd ../data/fastQC/*
+
+multiqc fastQC
+```
+
+> Results: looks OK, no adapter content detected
+
+## Trimming:
+
+```{Bash engine.path="/bin/sh"}
+ls 
+for i in
+
+java -jar ../../../../shared/clssoft/apps/x86_64/trimmomatic/0.36/trimmomatic-0.36.jar PE
+../data/maize_heat/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_1.fastq.gz
+../data/maize_heat/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_2.fastq.gz
+../data/maize_heat/trimming/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_1_paired.fastq.gz
+../data/maize_heat/trimming/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_1_unpaired.fastq.gz
+../data/maize_heat/trimming/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_2_paired.fastq.gz
+../data/maize_heat/trimming/SRR12454894_RNA-seq_of_maize_inbred_B73_under_heat_BH1_2_unpaired.fastq.gz
+ILLUMINACLIP:../../../../shared/clssoft/apps/x86_64/trimmomatic/0.36/adapters/TruSeq2-PE.fa:2:30:10:2:True LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+
+```
+
+
+## 1.5. Build a decoyed transcriptome file
+
+```{Bash engine.path="/bin/sh"}
+
+#overview: make transcriptome from genome, take names without the > from the genome for "decoy.txt", cat trancriptome and genome
+
+# Transcriptome
+
+## get the fasta sequences of the transcripts from the gff file (use module AGAT, agat_sp_extract_sequences.pl for this), or work with a transcipt fasta. 
+
+#../data/refgenome/Zm-B73-REFERENCE_transcriptome-NAM-5.0_Zm00001eb.1.gff3
+#exon
+module load AGAT
+agat_sp_extract_sequences.pl -g ../data/refgenome/Zm-B73-REFERENCE_transcriptome-NAM-5.0_Zm00001eb.1.gff3 -f ../data/refgenome/Zm-B73-REFERENCE_genome-NAM-5.0.fa -t exon --merge -o ../data/refgenome/transcriptome_agat_ZmB73.fa
+#mRNA
+module load AGAT
+agat_sp_extract_sequences.pl --gff ../data/refgenome/Zm-B73-REFERENCE_transcriptome-NAM-5.0_Zm00001eb.1.gff3 --fasta ../data/refgenome/Zm-B73-REFERENCE_genome-NAM-5.0.fa --mrna  -o ../data/refgenome/transcriptome_agat_ZmB73.fa
+
+
+# Make a file with decoy names
+
+#decoy.sh
+grep ">" ../data/refgenome/Zm-B73-REFERENCE_genome-NAM-5.0.fa | cut -d " " -f 1 > ../data/reference/decoys_ZeamaysB73.txt # get all the contig names
+
+#-d (--delimiter) - Specify a delimiter that will be used instead of the default “TAB” delimiter.
+#-f (--fields=LIST) - Select by specifying a field, a set of fields, or a range of fields. This is the most commonly used option.
+
+sed -i.bak -e 's/>//g' ../data/reference/decoys_ZeamaysB73.txt #-i.back makes backup # remove all the >'s
+
+#concatenate_genome_transcriptome.sh
+# Merge the transcriptome file (24,633 tx) with the genome (2534 contigs)
+grep ">" ../data/refgenome/transcriptome_agat_ZmB73.fa | wc -l 
+#72539
+grep ">" ../data/refgenome/Zm-B73-REFERENCE_genome-NAM-5.0.fa | wc -l 
+#685
+
+#72539 + 685 = 73224
+
+#Before exon correction: 40433 = 40370+63
+
+cat ../data/refgenome/transcriptome_agat_ZmB73.fa ../data/refgenome/Zm-B73-REFERENCE_genome-NAM-5.0.fa > ../data/reference/transcriptome_and_decoy_ZmB73.fa
+
+# Check
+
+grep ">" ../data/reference/transcriptome_and_decoy_ZmB73.fa | wc -l #73224 ok
+
+```
+
+## 1.6. indexing
+
+```{Bash engine.path="/bin/sh"}
+#!/bin/bash
+
+module load salmon/x86_64/1.7.0
+
+salmon index -t ../data/reference/transcriptome_and_decoy_ZmB73.fa -d ../data/reference/decoys_ZeamaysB73.txt -k 31 -i ../data/salmon_index_maize/ -p 12 --keepDuplicates
+```
+> qsub -pe serial 12 -l h_vmem=8G indexing.sh
+
+## 1.7. Mapping with Salmon 1.3
+
+```{python engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3", include=FALSE}
+outlist_heat = ["#!/bin/bash",
+
+"module load salmon/x86_64/1.7.0" ,
+
+
+"while read -r i; do",
+
+'echo "processing sample ${i}"',
+
+'salmon quant -i ../data/salmon_index_maize -l A -1 "../data/maize_heat/trimming/${i}_1_paired.fastq.gz"  -2 "../data/maize_heat/trimming/${i}_2_paired.fastq.gz"  --validateMappings -o "../data/salmon_output_maize/${i}" -p 12 --seqBias --gcBias',
+
+'done < ../data/maize_heat/trimming/readsnames_forlooping_h.txt']
+
+outlist_drought = ["#!/bin/bash",
+
+"module load salmon/x86_64/1.7.0" ,
+
+
+"while read -r i; do",
+
+'echo "processing sample ${i}"',
+
+'salmon quant -i ../data/salmon_index_maize -l A -1 "../data/maize_drought/trimming/${i}_1_paired.fastq.gz"  -2 "../data/maize_drought/trimming/${i}_2_paired.fastq.gz"  --validateMappings -o "../data/salmon_output_maize/${i}" -p 12 --seqBias --gcBias',
+
+'done < ../data/maize_drought/trimming/readsnames_forlooping_d.txt']
+
+
+with open("salmon_mapping_moremem_slow_h.sh", "w") as f:
+    for i in outlist_heat:
+        f.write(str(i) + '\n')
+        
+with open("salmon_mapping_moremem_slow_d.sh", "w") as f:
+    for i in outlist_drought:
+        f.write(str(i) + '\n')
+```
+
+```{python}
+#jopab@midas:/group/transreg/jopab/src$ cat write_salmon_code.py
+#!/usr/bin/python
+
+outlist_heat = ["#!/bin/bash", "module load salmon/x86_64/1.7.0", "while read -r i; do",'echo "processing sample ${i}"','salmon quant -i ../data/salmon_index_maize -l A -1 "../data/maize_heat/trimming/${i}_1_paired.fastq.gz"  -2 "../data/maize_heat/trimming/${i}_2_paired.fastq.gz"  --validateMappings -o "../data/salmon_output_maize/${i}" -p 12 --seqBias --gcBias','done < ../data/maize_heat/trimming/readsnames_forlooping_h.txt']
+
+outlist_drought = ["#!/bin/bash","module load salmon/x86_64/1.7.0" ,"while read -r i; do",'echo "processing sample ${i}"','salmon quant -i ../data/salmon_index_maize -l A -1 "../data/maize_drought/trimming/${i}_1_paired.fastq.gz"  -2 "../data/maize_drought/trimming/${i}_2_paired.fastq.gz"  --validateMappings -o "../data/salmon_output_maize/${i}" -p 12 --seqBias --gcBias','done < ../data/maize_drought/trimming/readsnames_forlooping_d.txt']
+
+
+with open("salmon_mapping_moremem_slow_h.sh", "w") as f:
+    for i in outlist_heat:
+        f.write(str(i) + '\n')
+
+with open("salmon_mapping_moremem_slow_d.sh", "w") as f:
+    for i in outlist_drought:
+        f.write(str(i) + '\n')
+
+```
+
+
+```{Bash engine.path="/bin/sh"}
+cat salmon_mapping_moremem_slow_h.sh
+cat salmon_mapping_moremem_slow_d.sh
+```
+
+> qsub -pe serial 12 -l h_vmem=8G salmon_mapping_moremem_slow_h.sh
+> qsub -pe serial 12 -l h_vmem=8G salmon_mapping_moremem_slow_d.sh
+
+## Mapping rates
+```{python engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3"}
+#checking the mapping rates (check_mapping.py)
+#!/usr/bin/python
+
+print(">job5h_salmon.e1942847")
+mrdict = {}
+mr = str()
+i = str()
+import csv
+with open("job5h_salmon.e1942847", "r") as f:
+  freader = csv.reader(f, delimiter = "]")
+  for line in freader:
+    #print(line)
+    if len(line)>1:
+      if line[0].endswith("output "):
+        i=line[1].split("/")[3].split("_")[0].split("_")[0]
+    if len(line)>2:
+      if line[3].startswith(" Mapping rate"):
+        mr = line[3].strip()
+    mrdict[i]=mr
+for k, v in mrdict.items():
+  print(k, " --> ", v)
+
+
+print(">job5d_salmon.e1942848")
+mrdict = {}
+mr = str()
+i = str()
+import csv
+with open("job5d_salmon.e1942848", "r") as f:
+  freader = csv.reader(f, delimiter = "]")
+  for line in freader:
+    if len(line)>1:
+      if line[0].endswith("output "):
+        i=line[1].split("/")[3].split("_")[0].split("_")[0]
+    if len(line)>2:
+      if line[3].startswith(" Mapping rate"):
+        mr = line[3].strip()
+    mrdict[i]=mr
+for k, v in mrdict.items():
+  print(k, " --> ", v)
+```
+
+## tx2gene
+```{python engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3"}
+# make tx2gene (tx2gene.py)
+
+import csv
+txgenedict = {}
+with open("../data/refgenome/transcriptome_agat_ZmB73.fa", "r") as f:
+  freader = csv.reader(f, delimiter = " ")
+  for line in list(freader): #testing [0:10]
+    if len(line)>2:
+      tx = line[0].strip(">")
+      gene = line[1].split("=")[1]
+      txgenedict[tx]=gene
+with open("../data/refgenome/tx2gene_agat_ZmB73.csv", "w") as f:
+  writer = csv.writer(f)
+  writer.writerow(["transcript_ID", "gene_ID"])
+  for key, val in txgenedict.items():
+    writer.writerow([key, val])
+
+```
+
+
+```{bash engine.path="/bin/sh"}
+head ../data/refgenome/tx2gene_agat_ZmB73.csv
+```
+
+
+# 2. Diferential Expression (DE) analysis
+
+```{r not run}
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install(version = "3.14")
+```
+
+```{r}
+#documentation: https://www.bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf
+setwd("/group/transreg/jopab/src")
+
+library(ggplot2); library(tidyr); library(edgeR) ; library(stageR) ; library(tximport) ; library(readr); library(openxlsx)
+
+#Heat metadata
+meta_h <- read.csv("../data/maize_heat/SraRunTable_maize_heat.csv", header = TRUE, sep=",")
+meta_h
+meta_h$condition <- factor(c("control","control","control","control","heat","heat","heat","heat","heat"))
+meta_h$condition_detail <- factor(c("control_H","control_H","control_H","control_H","heat","heat","heat","heat","heat"))
+meta_h$replicate <- factor(c("1","2","3","4","1","2","3","4","5"))
+meta_h$Sample_name <- c(paste(meta_h$Run,"_",meta_h$condition,"_",meta_h$replicate, sep="", collapse=NULL))
+meta_h$Sample_name_detail <- c(paste(meta_h$Run,"_",meta_h$condition_detail,"_",meta_h$replicate, sep="", collapse=NULL))
+
+#Drought metadata
+meta_d <- read.csv("../data/maize_drought/SraRunTable_maize_drought.csv", header = TRUE, sep=",")
+meta_d$condition <- factor(c("control","control","control","drought","drought","drought"))
+meta_d$condition_detail <- factor(c("control_D","control_D","control_D","drought","drought","drought"))
+meta_d$replicate <- factor(c("1","2","3","1","2","3"))
+meta_d$Sample_name <- c(paste(meta_d$Run,"_",meta_d$condition,"_",meta_d$replicate, sep="", collapse=NULL))
+meta_d$Sample_name_detail <- c(paste(meta_d$Run,"_",meta_d$condition_detail,"_",meta_d$replicate, sep="", collapse=NULL))
+meta_d
+
+# Heat + Drought
+#install.packages("dplyr")
+library(dplyr)
+mini_meta_h <- select(meta_h, Sample_name_detail, Sample_name, Run, condition, condition_detail, replicate)
+mini_meta_d <- select(meta_d, Sample_name_detail, Sample_name, Run, condition, condition_detail, replicate)
+
+mini_meta_hd <- rbind(mini_meta_h, mini_meta_d)
+```
+
+
+```{r}
+tx2gene <- read.table("../data/refgenome/tx2gene_agat_ZmB73.csv", sep=",", header=TRUE)
+tx2gene
+#https://i.imgur.com/FdjzZtg.png
+```
+
+We import the mapping data into a data-frame format.
+```{r}
+#setwd("/group/transreg/jopab/src")
+head("../data/salmon_output_maize/SRR12454894_heat_1/quant.sf")
+library(tximport);library(readr);library(tidyverse);library(edgeR)
+
+#txi <- tximport(files=paste0("../data/salmon_output_maize/", meta_h$Run, "/quant.sf"), type = "salmon", tx2gene = tx2gene)
+#txi
+#names(txi)
+#https://bioconductor.org/packages/devel/bioc/vignettes/tximport/inst/doc/tximport.html
+
+#Heat data
+data_h <- as.data.frame(tximport(files=paste0("../data/salmon_output_maize/", meta_h$Run,"_",meta_h$condition,"_",meta_h$replicate, "/quant.sf"), type = "salmon", tx2gene = tx2gene)$counts)
+colnames(data_h) <- c(meta_h$Sample_name)
+data_h
+
+#Drought data
+data_d <- as.data.frame(tximport(files=paste0("../data/salmon_output_maize/", meta_d$Run,"_",meta_d$condition,"_",meta_d$replicate, "/quant.sf"), type = "salmon", tx2gene = tx2gene)$counts)
+colnames(data_d) <- c(meta_d$Sample_name)
+data_d
+
+#Heat + Drought data
+
+colnames(data_h) <- c(meta_h$Sample_name_detail)
+colnames(data_d) <- c(meta_d$Sample_name_detail)
+
+data_hd <-  cbind(data_h, data_d)
+data_hd
+
+#We leave the headers of the separate datasets nicely
+colnames(data_h) <- c(meta_h$Sample_name)
+colnames(data_d) <- c(meta_d$Sample_name)
+```
+
+## We save the total counts per sample as library_size_(h/d) text file. For doing this, we sum all the values of each column to get the total number of reads per sample.
+```{r}
+df_h <- colSums(data_h)
+write.table(df_h, "../results/DE_salmon/library_size_h.txt", col.names = F, quote = F)
+df_h
+
+df_d <- colSums(data_d)
+write.table(df_d, "../results/DE_salmon/library_size_d.txt", col.names = F, quote = F)
+df_d
+
+df_hd <- colSums(data_hd)
+write.table(df_hd, "../results/DE_salmon/library_size_hd.txt", col.names = F, quote = F)
+df_hd
+```
+## Filtering
+We filter the genes, removing those genes with extremely low expression ammong all the samples for heat and drought. For doing this we do the sum of the cpm per gene (the sum of the rows) and keep those where the cpm is higher than 1 across all samples.
+```{r}
+# Heat: we maintain those genes with at least 1 count/million mapped reads (cpm) in each sample, and in all the 9 samples (because 4+5 replicates)
+keep_h <- rowSums(cpm(data_h)>1)>=9 #data_h = 39756
+table(keep_h) # TRUE FALSE
+data_kept_h <- data_h[keep_h,] # 24148 genes were removed, 15608 were retained
+
+write.table(colSums(data_kept_h), "../results/DE_salmon/library_size_filtered_h.txt", col.names = F, quote = F, row.names = meta_h$Sample_name)
+
+# Drought: we maintain those genes with at least 1 count/million mapped reads (cpm) in each sample, and in all the 6 samples (because 4+5 replicates)
+keep_d <- rowSums(cpm(data_d)>1)>=6 #data_d = 39756
+table(keep_d) # TRUE FALSE
+data_kept_d <- data_d[keep_d,] # 20766 genes were removed, 18990 were retained
+
+write.table(colSums(data_kept_d), "../results/DE_salmon/library_size_filtered_d.txt", col.names = F, quote = F, row.names = meta_d$Sample_name)
+
+# Heat + Drought (6 +9 = 15 biological replicates in total)
+keep_hd <- rowSums(cpm(data_hd)>1)>=15 #data_h = 39756 # 
+table(keep_hd) # true false
+data_kept_hd <- data_hd[keep_hd,] # 24340 genes were removed, 15416 were retained
+
+write.table(colSums(data_kept_hd), "../results/DE_salmon/library_size_filtered_hd.txt", col.names = F, quote = F, row.names = mini_meta_hd$Sample_name_detail)
+```
+
+## DGEList (raw data)
+```{r}
+treatment_h <- factor(meta_h$condition)
+treatment_d <- factor(meta_d$condition)
+treatment_hd <- factor(mini_meta_hd$condition_detail)
+
+# Normalization
+# Save normalized (but not filtered) CPM
+
+## Heat
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+w_h <- DGEList(data_h, group=treatment_h)
+w_h <- calcNormFactors(w_h) 
+w_h$samples$lib.size <- colSums(w_h$counts)
+w_h$samples
+
+write.table(cpm(w_h), "../results/DE_salmon/CPM_raw_normalized_NOTfiltered_h.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(w_h)
+
+
+## Drought
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+w_d <- DGEList(data_d, group=treatment_d)
+w_d <- calcNormFactors(w_d) 
+w_d$samples$lib.size <- colSums(w_d$counts)
+w_d$samples
+
+write.table(cpm(w_d), "../results/DE_salmon/CPM_raw_normalized_NOTfiltered_d.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(w_d)
+
+
+## Heat + Drought
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+w_hd <- DGEList(data_hd, group=treatment_hd)
+w_hd$samples$lib.size <- colSums(w_hd$counts)
+w_hd$samples
+
+write.table(cpm(w_hd), "../results/DE_salmon/CPM_raw_normalized_NOTfiltered_hd.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(w_hd)
+```
+
+
+## DGEList (kept data (filtered)): this will be the data that we will continue using for the analysis, since it has been already filtered.
+```{r}
+library(ggplot2); library(gtools)
+treatment_h <- factor(meta_h$condition)
+treatment_d <- factor(meta_d$condition)
+treatment_hd <- factor(mini_meta_hd$condition_detail)
+
+# Normalization
+# Save normalized (and filtered) CPM
+## Heat
+
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+y_h <- DGEList(data_kept_h, group=treatment_h)
+y_h <- calcNormFactors(y_h) 
+y_h$samples$lib.size <- colSums(y_h$counts)
+y_h$samples
+#Counts per million (CPM)
+y_h$CPM <- cpm(y_h, log=TRUE, prior.count = 1)
+head(y_h$CPM)
+#Log2(fold change): respectively form the average of the control samples
+y_h$Log2FC <- foldchange2logratio(foldchange(y_h$CPM,rowMeans(y_h$CPM[,1:4])), base = 2)
+
+write.table(y_h$CPM, "../results/DE_salmon/CPM_filtered_h.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_h$Log2FC, "../results/DE_salmon/Log2FC_filtered_h.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_h$samples, "../results/DE_salmon/INFO_DGE_filtered_h.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(y_h)
+ggplot(y_h$samples, aes(x = rownames(y_h$samples),y = lib.size, fill=as.factor(group))) + geom_bar(stat = "identity") + ggtitle("Heat library size") + xlab("Samples") + ylab("Library size") +theme(panel.background = element_blank(),plot.title = element_text(hjust = 0.5), axis.text.x=element_text(angle = 45, vjust = 1, hjust=1),
+      panel.grid.major = element_line(colour = "grey93"),
+      panel.border = element_rect(colour="grey",fill=NA))
+
+## Drought
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+y_d <- DGEList(data_kept_d, group=treatment_d)
+y_d <- calcNormFactors(y_d) 
+y_d$samples$lib.size <- colSums(y_d$counts)
+y_d$samples
+
+#Counts per million (CPM)
+y_d$CPM <- cpm(y_d, log=TRUE, prior.count = 1)
+head(y_d$CPM)
+#Log2(fold change): respectively form the average of the control samples
+y_d$Log2FC <- foldchange2logratio(foldchange(y_d$CPM,rowMeans(y_d$CPM[,1:3])), base = 2)
+
+write.table(y_d$CPM, "../results/DE_salmon/CPM_filtered_d.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_d$Log2FC, "../results/DE_salmon/Log2FC_filtered_d.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_d$samples, "../results/DE_salmon/INFO_DGE_filtered_d.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(y_d)
+ggplot(y_d$samples, aes(x = rownames(y_d$samples),y = lib.size, fill=as.factor(group))) + geom_bar(stat = "identity") + ggtitle("Drought library size") + xlab("Samples") + ylab("Library size") +theme(panel.background = element_blank(),plot.title = element_text(hjust = 0.5), axis.text.x=element_text(angle = 45, vjust = 1, hjust=1),
+      panel.grid.major = element_line(colour = "grey93"),
+      panel.border = element_rect(colour="grey",fill=NA))
+
+## Heat + Drought
+# We perform a trimmed mean of M values (TMM) normalization. It calculate normalization factors to scale the raw library sizes.
+y_hd <- DGEList(data_kept_hd, group=treatment_hd)
+y_hd <- calcNormFactors(y_hd) 
+y_hd$samples$lib.size <- colSums(y_hd$counts)
+y_hd$samples
+
+#Counts per million (CPM)
+y_hd$CPM <- cpm(y_hd, log=TRUE, prior.count = 1)
+head(y_hd$CPM)
+#Log2(fold change): respectively form the average of the control samples
+FC_h <- foldchange2logratio(foldchange(y_hd$CPM[,1:9],rowMeans(y_hd$CPM[,1:4])), base = 2)
+FC_d <- foldchange2logratio(foldchange(y_hd$CPM[,10:15],rowMeans(y_hd$CPM[,10:12])), base = 2)
+y_hd$Log2FC <- cbind(FC_h,FC_d)
+
+write.table(y_hd$CPM, "../results/DE_salmon/CPM_filtered_hd.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_hd$Log2FC, "../results/DE_salmon/Log2FC_filtered_hd.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+write.table(y_hd$samples, "../results/DE_salmon/INFO_DGE_filtered_hd.csv", col.names = T, row.names = T, quote = F, sep = "\t")
+#summary(y_hd)
+ggplot(y_hd$samples, aes(x = rownames(y_hd$samples),y = lib.size, fill=as.factor(group))) + geom_bar(stat = "identity") + ggtitle("Heat+Drought library size") + xlab("Samples") + ylab("Library size") +theme(panel.background = element_blank(),plot.title = element_text(hjust = 0.5), axis.text.x=element_text(angle = 45, vjust = 1, hjust=1),
+      panel.grid.major = element_line(colour = "grey93"),
+      panel.border = element_rect(colour="grey",fill=NA))
+```
+
+
+```{r}
+#MDS plot
+t_h <- plotMDS(y_h)
+MDS_df_h <- data.frame(t_h$x, t_h$y)
+
+t_d <- plotMDS(y_d)
+MDS_df_d <- data.frame(t_d$x, t_d$y)
+
+t_hd <- plotMDS(y_hd)
+MDS_df_hd <- data.frame(t_hd$x, t_hd$y)
+```
+
+
+```{r}
+cols_h <- c("orange2", "olivedrab3")
+cols_d <- c("firebrick3", "cyan4")
+cols_hd <- c("firebrick3", "orange2" ,"cyan4", "olivedrab3","yellow2" , "olivedrab2" ,"cyan2")
+
+library(ggplot2)
+
+#Maize heat ggplot
+MDS_h<- ggplot(data = MDS_df_h) +
+  geom_point(aes(x = t_h.x, y =t_h.y,  fill = meta_h$condition),size = 3, shape = 21)  +
+  theme_bw() +
+  theme(legend.box="horizontal") +
+  labs(fill = "Treatment") +
+  xlab("Leading logFC dim1") +
+  ylab("Leading logFC dim2") +
+  scale_fill_manual(values = cols_h) +
+  ggtitle("Principal Component Analysis (PCA) - Heat stress") +
+  theme(panel.grid =element_blank())
+MDS_h
+
+ggsave("../results/plots/MDS_h.png", height = 3, width = 6)
+ggsave("../results/plots/MDS_h.pdf", height = 3, width = 6)
+
+#Maize drought ggplot
+MDS_d<- ggplot(data = MDS_df_d) +
+  geom_point(aes(x = t_d.x, y =t_d.y,  fill = meta_d$condition),size = 3, shape = 21)  +
+  theme_bw() +
+  theme(legend.box="horizontal") +
+  labs(fill = "Treatment") +
+  xlab("Leading logFC dim1") +
+  ylab("Leading logFC dim2") +
+  scale_fill_manual(values = cols_d) +
+  ggtitle("Principal Component Analysis (PCA) - Drought stress") +
+  theme(panel.grid =element_blank())
+MDS_d
+
+ggsave("../results/plots/MDS_d.png", height = 3, width = 6)
+ggsave("../results/plots/MDS_d.pdf", height = 3, width = 6)
+
+#Maize heat+drought ggplot
+#cond_detail_hd <- c("heat","drought","control_H","control_D")
+
+MDS_hd <- ggplot(data = MDS_df_hd) +
+  geom_point(aes(x = t_hd.x, y =t_hd.y, fill = mini_meta_hd$condition_detail), size = 3, shape = 21) +
+  scale_shape_identity() +
+  theme_bw() +
+  theme(legend.box="horizontal") +
+  labs(fill = "Treatment") +
+  xlab("Leading logFC dim1") +
+  ylab("Leading logFC dim2") +
+  scale_fill_manual(values = cols_hd) +
+  ggtitle("Principal Component Analysis (PCA) - Heat + Drought stress") +
+  theme(panel.grid =element_blank())
+MDS_hd
+
+ggsave("../results/plots/MDS_hd.png", height = 3, width = 6)
+ggsave("../results/plots/MDS_hd.pdf", height = 3, width = 6)
+
+```
+
+```{r}
+write.csv(y_h$counts, file = '../results/DE_salmon/counts_filtered_and_normalised_h.csv')
+write.csv(y_d$counts, file = '../results/DE_salmon/counts_filtered_and_normalised_d.csv')
+```
+
+## We separate the control from the treated samples
+```{bash}
+# Heat
+cut -f 1-5 -d "," ../results/DE_salmon/counts_filtered_and_normalised_h.csv > ../results/DE_salmon/counts_control_h.csv
+cut -f 1,6-10 -d "," ../results/DE_salmon/counts_filtered_and_normalised_h.csv > ../results/DE_salmon/counts_heat_h.csv
+# Drought
+cut -f 1-4 -d "," ../results/DE_salmon/counts_filtered_and_normalised_d.csv > ../results/DE_salmon/counts_control_d.csv
+cut -f 1,5-7 -d "," ../results/DE_salmon/counts_filtered_and_normalised_d.csv > ../results/DE_salmon/counts_drought_d.csv
+
+head -n 3 ../results/DE_salmon/counts_control_h.csv
+head -n 3 ../results/DE_salmon/counts_heat_h.csv
+head -n 3 ../results/DE_salmon/counts_control_d.csv
+head -n 3 ../results/DE_salmon/counts_drought_d.csv
+```
+
+## Create a model and estimate the dispersion.
+The MDS figure demonstrates that the control and stress condition (heat or drought) samples cluster separately, implying that their gene expression is similar (within each cluster). However, during the drought condition, it appears that one of the three biological replicates is an outlier. The design matrix, based on the experimental design, must be created before fitting the data to a generalised linear model.
+
+The model parameters are estimated using the design matrix. The sample names are in the rows, while the proposed model parameters are in the columns.
+```{r}
+# DE analysis
+# Heat
+trt_h <- factor(meta_h$condition)
+design_h <- model.matrix(~ trt_h + 0) # We add 0 to preserve control as an independent variable
+rownames(design_h) <- colnames(y_h$counts)
+colnames(design_h) <- c("Control", "Heat")
+design_h
+
+# Drought
+trt_d <- factor(meta_d$condition)
+design_d <- model.matrix(~ trt_d + 0) # We add 0 to preserve control as an independent variable
+rownames(design_d) <- colnames(y_d$counts)
+colnames(design_d) <- c("Control", "Drought")
+design_d
+```
+
+We calculate the average dispersion across all genes, and this dispersion accounts for the  biological variation between the replicates of each dataset. We reinforce (or make it more robust) it against possible outlier genes; and then plot the coef. of biological variation between replicates. The genewise dispersions are depicted on the BCV figure. There is more dispersion at low log CPM than at higher log CPM.
+```{r}
+library(statmod)
+# Heat
+y_h <- estimateDisp(y_h, design_h, robust = TRUE) 
+#png(file="../results/plots/BCV_h.png")
+#pdf(file="../results/plots/BCV_h.pdf")
+plotBCV(y_h, main="Heat stress - Biological Coefficient of Variation (BCV)")
+#dev.off()
+
+# Drought
+y_d <- estimateDisp(y_d, design_d, robust = TRUE) 
+#png(file="../results/plots/BCV_d.png")
+#pdf(file="../results/plots/BCV_d.pdf")
+plotBCV(y_d, main="Drought stress - Biological Coefficient of Variation (BCV)")
+#dev.off()
+
+#We fit the generalised linear model (GLM) to the data
+fit_h <- glmQLFit(y_h, design_h, robust = TRUE)
+fit_d <- glmQLFit(y_d, design_d, robust = TRUE)
+```
+
+The following step is to identify the genes that are differently expressed. As a result, the glmQLFTest  test is more restrictive than the glmTreat, results in less type I errors, and finds genes whose differential expression has a higher physiological importance and that could be further studied later. We apply the FDR (False Discovery Rate) for adjusting the P-values; however we observe that the number of genes DE is the same.
+https://www.rdocumentation.org/packages/edgeR/versions/3.8.6/topics/glmQLFit
+```{r}
+# Fit the NB model using treatment replicates.
+## Heat
+qlt_h <-  glmQLFTest(fit_h, coef=2) #we look for the effect of heat (2) versus control (1)
+pval_h = qlt_h$table$PValue
+sum(pval_h < 0.05) # 15608 genes
+qlt_h$table$FDR = p.adjust(qlt_h$table$PValue, method="fdr")
+FDR_h <- p.adjust(qlt_h$table$PValue, method="fdr")
+sum(FDR_h < 0.05) # 15608 genes
+
+topTags(qlt_h, n=100, p.value = 0.05) #topTags show the TOP DE genes
+plotQLDisp(fit_h) # visualise QL dispersions
+
+## Drought
+qlt_d <-  glmQLFTest(fit_d, coef=2) #we look for the effect of drought (2) versus control (1)
+pval_d = qlt_d$table$PValue
+sum(pval_d < 0.05) # 18990 genes
+qlt_d$table$FDR = p.adjust(qlt_d$table$PValue, method="fdr")
+FDR_d <- p.adjust(qlt_d$table$PValue, method="fdr")
+sum(FDR_d < 0.05) # 18990 genes
+
+topTags(qlt_d, n=100, p.value = 0.05) # topTags show the TOP DE genes
+plotQLDisp(fit_d) # visualise QL dispersions
+```
+## Determine the contrast for each dataset
+```{r}
+# Determine contrasts
+colnames(design_h) <- c("Control", "Heat")
+colnames(design_d) <- c("Control", "Drought")
+L_h <- makeContrasts(DE_h = Heat - Control, levels=design_h)
+L_h
+L_d <- makeContrasts(DE_d = Drought - Control, levels=design_d)
+L_d
+```
+
+
+## DE testing parameters experiments:
+
+## DE settings: lfc = 1 and p-value = 0.05
+
+Whether "glmfit" was generated by "glmFit" or "glmQLFit" is determined by the function "glmTreat." It performs a modified likelihood ratio test (LRT) against the fold-change  threshold (lfc) in the former example. The function used is "glmQLFit" and, it performs a quasi-likelihood (QL) F-test against the threshold in the later instance. Furthermore, it employs an FDR cut-off value of 0.05 (5%).
+```{r}
+# Estimate the diferentially exrpressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_lfc1 <- list() 
+
+## Heat
+LR_lfc1[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 1)
+LR_lfc1$DE_h$table$FDR <- p.adjust(LR_lfc1$DE_h$table$PValue, "BH")
+head(LR_lfc1$DE_h)
+
+lfc1_DE_table_h <- LR_lfc1$DE_h$table
+head(lfc1_DE_table_h)
+
+## Drought
+LR_lfc1[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 1)
+LR_lfc1$DE_d$table$FDR <- p.adjust(LR_lfc1$DE_d$table$PValue, "BH")
+head(LR_lfc1$DE_d)
+
+lfc1_DE_table_d <- LR_lfc1$DE_d$table
+head(lfc1_DE_table_d)
+```
+
+Chen, 2016, From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline (https://f1000research.com/articles/5-1438):
+*"The p-values from glmTreat are larger than those from glmQLFTest, and the number of significantly DE genes is fewer, because it is testing an interval null hypothesis and requires stronger evidence for differential expression than does a conventional test. It provides greater specificity for identifying the most important genes with large fold changes"*
+
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+
+We want to determine how many genes are deferentially expressed with a log fold change (LogFC) higher than 1 and a False Discovery Rate (FDR) (or adjusted p-value) < 0.05 [Parameters: lfc = 1 and p.value = 0.05]
+```{r}
+#lfc = 1 and p.value = 0.05
+## Heat
+DEC.de_lfc1_h <- decideTestsDGE(LR_lfc1$DE_h, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc1_h)
+head(DEC.de_lfc1_h)
+dim(DEC.de_lfc1_h) # 15608 genes have been processed
+plotMD(LR_lfc1$DE_h, status=DEC.de_lfc1_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc1_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc1_h.pdf", width=10,height=7)
+plotSmear(LR_lfc1$DE_h, de.tags = rownames(LR_lfc1$DE_h$table)[which(LR_lfc1$DE_h$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc1_h, file='../results/DE_salmon/lfc1_de_updown_h.csv')
+
+
+## Drought
+DEC.de_lfc1_d <- decideTestsDGE(LR_lfc1$DE_d, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc1_d)
+head(DEC.de_lfc1_d)
+dim(DEC.de_lfc1_d) #18990 genes have been processed   
+
+plotMD(LR_lfc1$DE_d, status=DEC.de_lfc1_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc1_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc1_d.pdf", width=10,height=7)
+plotSmear(LR_lfc1$DE_d, de.tags = rownames(LR_lfc1$DE_d$table)[which(LR_lfc1$DE_d$table$FDR<0.05)])
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc1_d,  file='../results/DE_salmon/lfc1_de_updown_d.csv')
+#dev.off()
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_lfc1$DE_h$table) # 15608 total genes
+
+sigReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h>0 | DEC.de_lfc1_h<0,]
+sigReg_lfc1_h <- sigReg_lfc1_h[order(sigReg_lfc1_h$logFC, decreasing=TRUE),]
+dim(sigReg_lfc1_h) # 2707 significant genes (FDR < 0.5)
+
+sigUpReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h>0 ,]
+sigUpReg_lfc1_h <- sigUpReg_lfc1_h[order(sigUpReg_lfc1_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc1_h) # 1425 upregulated genes
+head(sigUpReg_lfc1_h)
+
+sigDownReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h<0,]
+sigDownReg_lfc1_h <- sigDownReg_lfc1_h[order(sigDownReg_lfc1_h$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc1_h)
+dim(sigDownReg_lfc1_h) # 1282 downregulated genes
+
+#export data
+upreg_lfc1_h <- rownames(sigUpReg_lfc1_h)
+write(upreg_lfc1_h, file="../results/DE_salmon/maize_lfc1_upreg_h.txt")
+write.csv(sigUpReg_lfc1_h, file="../results/DE_salmon/maize_lfc1_upreg_TABLE_h.csv")
+
+downreg_lfc1_h <- rownames(sigDownReg_lfc1_h)
+write(downreg_lfc1_h,file="../results/DE_salmon/maize_lfc1_downreg_h.txt")
+write.csv(sigDownReg_lfc1_h, file="../results/DE_salmon/maize_lfc1_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_lfc1$DE_d$table) # 18990 total genes
+
+sigReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d>0 | DEC.de_lfc1_d<0,]
+sigReg_lfc1_d <- sigReg_lfc1_d[order(sigReg_lfc1_d$logFC, decreasing=TRUE),]
+dim(sigReg_lfc1_d) # 0 significant genes (FDR < 0.5)
+
+sigUpReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d>0 ,]
+sigUpReg_lfc1_d <- sigUpReg_lfc1_d[order(sigUpReg_lfc1_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc1_d) # 0 upregulated genes
+head(sigUpReg_lfc1_d)
+
+sigDownReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d<0,]
+sigDownReg_lfc1_d <- sigDownReg_lfc1_d[order(sigDownReg_lfc1_d$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc1_d)
+dim(sigDownReg_lfc1_d) # 0 downregulated genes
+
+#export data
+upreg_lfc1_d <- rownames(sigUpReg_lfc1_d)
+write(upreg_lfc1_d, file="../results/DE_salmon/maize_lfc1_upreg_d.txt")
+write.csv(sigUpReg_lfc1_d, file="../results/DE_salmon/maize_lfc1_upreg_TABLE_d.csv")
+
+downreg_lfc1_d <- rownames(sigDownReg_lfc1_d)
+write(downreg_lfc1_d,file="../results/DE_salmon/maize_lfc1_downreg_d.txt")
+write.csv(sigDownReg_lfc1_d, file="../results/DE_salmon/maize_lfc1_downreg_TABLE_d.csv")
+```
+
+
+
+### Volcano plot
+```{r}
+# Heat
+volcanoData_lfc1_h <- cbind(LR_lfc1$DE_h$table$logFC, -log10(LR_lfc1$DE_h$table$FDR))
+colnames(volcanoData_lfc1_h) <- c("logFC", "-log10(P-value)")
+head(volcanoData_lfc1_h)
+#png(file="../results/plots/volcano_lfc1_h.png", width=10,height=6,units="in",res=800)
+#pdf(file="../results/plots/volcano_lfc1_h.pdf", width=10,height=6)
+plot(volcanoData_lfc1_h, pch=19)
+#dev.off()
+
+# Drought
+volcanoData_lfc1_d <- cbind(LR_lfc1$DE_d$table$logFC, -log10(LR_lfc1$DE_d$table$FDR))
+colnames(volcanoData_lfc1_d) <- c("logFC", "-log10(P-value)")
+head(volcanoData_lfc1_d)
+#png(file="../results/plots/volcano_lfc1_d.png", width=10,height=6,units="in",res=800)
+#pdf(file="../results/plots/volcano_lfc1_d.pdf", width=10,height=6)
+plot(volcanoData_lfc1_d, pch=19)
+#dev.off()
+```
+
+## We check wether the CPM and Log2FC values are mean centered and varaince rescaled to be able to plot them.
+```{r}
+#Heat
+LFC_raw_h <- y_h$Log2FC
+CPM_raw_h <- y_h$CPM
+
+dim(LFC_raw_h) #15608     9
+dim(CPM_raw_h) #15608     9
+
+# check first whether the data are already mean centered and variance rescaled
+head(rowMeans(LFC_raw_h, na.rm=TRUE)) #(should be 0)
+head(apply(as.matrix(LFC_raw_h), 1, sd, na.rm=TRUE))#(should be 1)
+head(rowMeans(CPM_raw_h, na.rm=TRUE)) #(should be 0)
+head(apply(as.matrix(CPM_raw_h), 1, sd, na.rm=TRUE))#(should be 1)
+
+#variance rescaling and centering --> Log2FC
+#centering
+row_mean_LFC_h = apply(as.matrix(LFC_raw_h), 1, mean, na.rm=TRUE)
+LFC_meancentered_h = as.matrix(LFC_raw_h) - row_mean_LFC_h
+dim(LFC_meancentered_h) #15608     9
+head(rowMeans(LFC_meancentered_h, na.rm=TRUE)) #(should be 0)
+
+#variance rescaling
+SD_LFC_h = apply(as.matrix(LFC_meancentered_h), 1, sd, na.rm=TRUE)
+LFC_rescaled_h = as.matrix(LFC_meancentered_h)/SD_LFC_h
+dim(LFC_rescaled_h) 
+head(apply(as.matrix(LFC_rescaled_h), 1, sd, na.rm=TRUE))#(should be one)
+
+LFC_rescaled_h[1,1:9]
+#mean(as.matrix(LFC_rescaled_h[2,]), na.rm=TRUE) #mean equal to zero
+head(rownames(LFC_rescaled_h))
+
+
+#variance rescaling and centering --> CPM
+#centering
+row_mean_CPM_h = apply(as.matrix(CPM_raw_h), 1, mean, na.rm=TRUE)
+CPM_meancentered_h = as.matrix(CPM_raw_h) - row_mean_CPM_h
+dim(CPM_meancentered_h) #15608     9
+head(rowMeans(CPM_meancentered_h, na.rm=TRUE)) #(should be 0)
+
+#variance rescaling
+SD_CPM_h = apply(as.matrix(CPM_meancentered_h), 1, sd, na.rm=TRUE)
+CPM_rescaled_h = as.matrix(CPM_meancentered_h)/SD_CPM_h
+dim(CPM_rescaled_h) 
+head(apply(as.matrix(CPM_rescaled_h), 1, sd, na.rm=TRUE))#(should be one)
+
+CPM_rescaled_h[1,1:9]
+#mean(as.matrix(CPM_rescaled_h[2,]), na.rm=TRUE) #mean equal to zero
+head(rownames(CPM_rescaled_h))
+```
+
+## Heatmap up and downregulated top genes from lfc1 parameters
+```{r}
+#Heatmap
+UP_L2FC_lfc1_h <- LFC_rescaled_h[upreg_lfc1_h[1:20],]
+DOWN_L2FC_lfc1_h <- LFC_rescaled_h[downreg_lfc1_h[1:20],]
+UPDOWN_L2FC_lfc1_h <- rbind(UP_L2FC_lfc1_h,DOWN_L2FC_lfc1_h)
+colnames(UPDOWN_L2FC_lfc1_h) <- c("Control 1","Control 2","Control 3","Control 4","Heat 1","Heat 2","Heat 3","Heat 4","Heat 5")
+
+heatmap(UP_L2FC_lfc1_h, scale = "row")
+heatmap(DOWN_L2FC_lfc1_h, scale = "row")
+heatmap(UPDOWN_L2FC_lfc1_h, scale = "row")
+
+library("gplots")
+mar=c(1,1,1,1)
+par(mar)
+heatmap.2(UPDOWN_L2FC_lfc1_h, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none")
+
+library("pheatmap")
+pheatmap(UPDOWN_L2FC_lfc1_h, cutree_rows = 4)
+
+
+
+library(ComplexHeatmap); library(circlize);library(RColorBrewer);library(dendextend)
+mycols <- colorRamp2(breaks = c(-2, 0, 2), 
+                    colors = c("blue", "white", "red"))
+#row_dend = hclust(dist(UPDOWN_L2FC_lfc1_h)) # row clustering
+#col_dend = hclust(dist(t(UPDOWN_L2FC_lfc1_h))) # column clustering
+samp.names <- c(colnames(UPDOWN_L2FC_lfc1_h))
+levels(samp.names) = samp.names
+
+Heatmap_simple <- Heatmap(UPDOWN_L2FC_lfc1_h, name = "Log2(FC)", column_title = "Samples", row_title = "Genes", column_order= samp.names, row_names_gp = gpar(fontsize = 6.5), cluster_columns = FALSE, cluster_rows = FALSE, col = mycols)
+
+#png(file="../results/plots/heatmap_h.png", width=4,height=6,units="in",res=800)
+#pdf(file="../results/plots/heatmap_h.pdf", width=4,height=6)
+Heatmap_simple
+#dev.off
+```
+
+## DE analysis parameter variation experiments:
+
+
+## DE with settings: lfc = 0 and p-value = 0.05 --> lfc0
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_lfc0 <- list() 
+
+## Heat
+LR_lfc0[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 0)
+LR_lfc0$DE_h$table$FDR <- p.adjust(LR_lfc0$DE_h$table$PValue, "BH")
+#head(LR_lfc0$DE_h)
+
+lfc0_DE_table_h <- LR_lfc0$DE_h$table
+head(lfc0_DE_table_h)
+
+## Drought
+LR_lfc0[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 0)
+LR_lfc0$DE_d$table$FDR <- p.adjust(LR_lfc0$DE_d$table$PValue, "BH")
+#head(LR_lfc0$DE_d)
+
+lfc0_DE_table_d <- LR_lfc0$DE_d$table
+head(lfc0_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+We want to determine how many genes are deferentially expressed with a log fold change (LogFC) higher than 0 and a False Discovery Rate (FDR) (or adjusted p-value) < 0.05 [Parameters: lfc = 0 and p.value = 0.05]
+```{r}
+#lfc = 0 and p.value = 0.05
+## Heat
+DEC.de_lfc0_h <- decideTestsDGE(LR_lfc0$DE_h, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc0_h)
+head(DEC.de_lfc0_h)
+dim(DEC.de_lfc0_h) # 15608 genes have been processed
+plotMD(LR_lfc0$DE_h, status=DEC.de_lfc0_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc0_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc0_h.pdf", width=10,height=7)
+plotSmear(LR_lfc0$DE_h, de.tags = rownames(LR_lfc0$DE_h$table)[which(LR_lfc0$DE_h$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc0_h, file='../results/DE_salmon/lfc0_de_updown_h.csv')
+
+
+## Drought
+DEC.de_lfc0_d <- decideTestsDGE(LR_lfc0$DE_d, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc0_d)
+head(DEC.de_lfc0_d)
+dim(DEC.de_lfc0_d) #18990 genes have been processed   
+
+plotMD(LR_lfc0$DE_d, status=DEC.de_lfc0_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc0_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc0_d.pdf", width=10,height=7)
+plotSmear(LR_lfc0$DE_d, de.tags = rownames(LR_lfc0$DE_d$table)[which(LR_lfc0$DE_d$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc0_d,  file='../results/DE_salmon/lfc0_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_lfc0$DE_h$table) # 15608 total genes
+
+sigReg_lfc0_h <- LR_lfc0$DE_h$table[DEC.de_lfc0_h>0 | DEC.de_lfc0_h<0,]
+sigReg_lfc0_h <- sigReg_lfc0_h[order(sigReg_lfc0_h$logFC, decreasing=TRUE),]
+dim(sigReg_lfc0_h) # 9244 significant genes (FDR < 0.05)
+
+sigUpReg_lfc0_h <- LR_lfc0$DE_h$table[DEC.de_lfc0_h>0 ,]
+sigUpReg_lfc0_h <- sigUpReg_lfc0_h[order(sigUpReg_lfc0_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc0_h) # 4553 upregulated genes
+head(sigUpReg_lfc0_h)
+
+sigDownReg_lfc0_h <- LR_lfc0$DE_h$table[DEC.de_lfc0_h<0,]
+sigDownReg_lfc0_h <- sigDownReg_lfc0_h[order(sigDownReg_lfc0_h$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc0_h)
+dim(sigDownReg_lfc0_h) # 4691 downregulated genes
+
+#export data
+upreg_lfc0_h <- rownames(sigUpReg_lfc0_h)
+write(upreg_lfc0_h, file="../results/DE_salmon/maize_lfc0_upreg_h.txt")
+write.csv(sigUpReg_lfc0_h, file="../results/DE_salmon/maize_lfc0_upreg_TABLE_h.csv")
+
+downreg_lfc0_h <- rownames(sigDownReg_lfc0_h)
+write(downreg_lfc0_h,file="../results/DE_salmon/maize_lfc0_downreg_h.txt")
+write.csv(sigDownReg_lfc0_h, file="../results/DE_salmon/maize_lfc0_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_lfc0$DE_d$table) # 18990 total genes
+
+sigReg_lfc0_d <- LR_lfc0$DE_d$table[DEC.de_lfc0_d>0 | DEC.de_lfc0_d<0,]
+sigReg_lfc0_d <- sigReg_lfc0_d[order(sigReg_lfc0_d$logFC, decreasing=TRUE),]
+dim(sigReg_lfc0_d) # 0 significant genes (FDR < 0.05)
+
+sigUpReg_lfc0_d <- LR_lfc0$DE_d$table[DEC.de_lfc0_d>0 ,]
+sigUpReg_lfc0_d <- sigUpReg_lfc0_d[order(sigUpReg_lfc0_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc0_d) # 0 upregulated genes
+head(sigUpReg_lfc0_d)
+
+sigDownReg_lfc0_d <- LR_lfc0$DE_d$table[DEC.de_lfc0_d<0,]
+sigDownReg_lfc0_d <- sigDownReg_lfc0_d[order(sigDownReg_lfc0_d$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc0_d)
+dim(sigDownReg_lfc0_d) # 0 downregulated genes
+
+#export data
+upreg_lfc0_d <- rownames(sigUpReg_lfc0_d)
+write(upreg_lfc0_d, file="../results/DE_salmon/maize_lfc0_upreg_d.txt")
+write.csv(sigUpReg_lfc0_d, file="../results/DE_salmon/maize_lfc0_upreg_TABLE_d.csv")
+
+downreg_lfc0_d <- rownames(sigDownReg_lfc0_d)
+write(downreg_lfc0_d,file="../results/DE_salmon/maize_lfc0_downreg_d.txt")
+write.csv(sigDownReg_lfc0_d, file="../results/DE_salmon/maize_lfc0_downreg_TABLE_d.csv")
+```
+
+
+## DE with settings: lfc = 1 and p-value = 0.05 --> lfc1
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_lfc1 <- list() 
+
+## Heat
+LR_lfc1[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 1)
+LR_lfc1$DE_h$table$FDR <- p.adjust(LR_lfc1$DE_h$table$PValue, "BH")
+#head(LR_lfc1$DE_h)
+
+lfc1_DE_table_h <- LR_lfc1$DE_h$table
+head(lfc1_DE_table_h)
+
+## Drought
+LR_lfc1[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 1)
+LR_lfc1$DE_d$table$FDR <- p.adjust(LR_lfc1$DE_d$table$PValue, "BH")
+#head(LR_lfc1$DE_d)
+
+lfc1_DE_table_d <- LR_lfc1$DE_d$table
+head(lfc1_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+```{r}
+#lfc = 1 and p.value = 0.05
+## Heat
+DEC.de_lfc1_h <- decideTestsDGE(LR_lfc1$DE_h, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc1_h)
+head(DEC.de_lfc1_h)
+dim(DEC.de_lfc1_h) # 15608 genes have been processed
+plotMD(LR_lfc1$DE_h, status=DEC.de_lfc1_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc1_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc1_h.pdf", width=10,height=7)
+plotSmear(LR_lfc1$DE_h, de.tags = rownames(LR_lfc1$DE_h$table)[which(LR_lfc1$DE_h$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc1_h, file='../results/DE_salmon/lfc1_de_updown_h.csv')
+
+
+## Drought
+DEC.de_lfc1_d <- decideTestsDGE(LR_lfc1$DE_d, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc1_d)
+head(DEC.de_lfc1_d)
+dim(DEC.de_lfc1_d) #18990 genes have been processed   
+
+plotMD(LR_lfc1$DE_d, status=DEC.de_lfc1_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc1_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc1_d.pdf", width=10,height=7)
+plotSmear(LR_lfc1$DE_d, de.tags = rownames(LR_lfc1$DE_d$table)[which(LR_lfc1$DE_d$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc1_d,  file='../results/DE_salmon/lfc1_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_lfc1$DE_h$table) # 15608 total genes
+
+sigReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h>0 | DEC.de_lfc1_h<0,]
+sigReg_lfc1_h <- sigReg_lfc1_h[order(sigReg_lfc1_h$logFC, decreasing=TRUE),]
+dim(sigReg_lfc1_h) # 2707 significant genes (FDR < 0.05)
+
+sigUpReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h>0 ,]
+sigUpReg_lfc1_h <- sigUpReg_lfc1_h[order(sigUpReg_lfc1_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc1_h) # 1425 upregulated genes
+head(sigUpReg_lfc1_h)
+
+sigDownReg_lfc1_h <- LR_lfc1$DE_h$table[DEC.de_lfc1_h<0,]
+sigDownReg_lfc1_h <- sigDownReg_lfc1_h[order(sigDownReg_lfc1_h$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc1_h)
+dim(sigDownReg_lfc1_h) # 1282 downregulated genes
+
+#export data
+upreg_lfc1_h <- rownames(sigUpReg_lfc1_h)
+write(upreg_lfc1_h, file="../results/DE_salmon/maize_lfc1_upreg_h.txt")
+write.csv(sigUpReg_lfc1_h, file="../results/DE_salmon/maize_lfc1_upreg_TABLE_h.csv")
+
+downreg_lfc1_h <- rownames(sigDownReg_lfc1_h)
+write(downreg_lfc1_h,file="../results/DE_salmon/maize_lfc1_downreg_h.txt")
+write.csv(sigDownReg_lfc1_h, file="../results/DE_salmon/maize_lfc1_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_lfc1$DE_d$table) # 18990 total genes
+
+sigReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d>0 | DEC.de_lfc1_d<0,]
+sigReg_lfc1_d <- sigReg_lfc1_d[order(sigReg_lfc1_d$logFC, decreasing=TRUE),]
+dim(sigReg_lfc1_d) # 0 significant genes (FDR < 0.05)
+
+sigUpReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d>0 ,]
+sigUpReg_lfc1_d <- sigUpReg_lfc1_d[order(sigUpReg_lfc1_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc1_d) # 0 upregulated genes
+head(sigUpReg_lfc1_d)
+
+sigDownReg_lfc1_d <- LR_lfc1$DE_d$table[DEC.de_lfc1_d<0,]
+sigDownReg_lfc1_d <- sigDownReg_lfc1_d[order(sigDownReg_lfc1_d$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc1_d)
+dim(sigDownReg_lfc1_d) # 0 downregulated genes
+
+#export data
+upreg_lfc1_d <- rownames(sigUpReg_lfc1_d)
+write(upreg_lfc1_d, file="../results/DE_salmon/maize_lfc1_upreg_d.txt")
+write.csv(sigUpReg_lfc1_d, file="../results/DE_salmon/maize_lfc1_upreg_TABLE_d.csv")
+
+downreg_lfc1_d <- rownames(sigDownReg_lfc1_d)
+write(downreg_lfc1_d,file="../results/DE_salmon/maize_lfc1_downreg_d.txt")
+write.csv(sigDownReg_lfc1_d, file="../results/DE_salmon/maize_lfc1_downreg_TABLE_d.csv")
+```
+
+## DE with settings: lfc = 2 and p-value = 0.05 --> lfc2
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_lfc2 <- list() 
+
+## Heat
+LR_lfc2[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 2)
+LR_lfc2$DE_h$table$FDR <- p.adjust(LR_lfc2$DE_h$table$PValue, "BH")
+#head(LR_lfc2$DE_h)
+
+lfc2_DE_table_h <- LR_lfc2$DE_h$table
+head(lfc2_DE_table_h)
+
+## Drought
+LR_lfc2[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 2)
+LR_lfc2$DE_d$table$FDR <- p.adjust(LR_lfc2$DE_d$table$PValue, "BH")
+#head(LR_lfc2$DE_d)
+
+lfc2_DE_table_d <- LR_lfc2$DE_d$table
+head(lfc2_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+```{r}
+#lfc = 2 and p.value = 0.05
+## Heat
+DEC.de_lfc2_h <- decideTestsDGE(LR_lfc2$DE_h, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc2_h)
+head(DEC.de_lfc2_h)
+dim(DEC.de_lfc2_h) # 15608 genes have been processed
+plotMD(LR_lfc2$DE_h, status=DEC.de_lfc2_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc2_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc2_h.pdf", width=10,height=7)
+plotSmear(LR_lfc2$DE_h, de.tags = rownames(LR_lfc2$DE_h$table)[which(LR_lfc2$DE_h$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc2_h, file='../results/DE_salmon/lfc2_de_updown_h.csv')
+
+
+## Drought
+DEC.de_lfc2_d <- decideTestsDGE(LR_lfc2$DE_d, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc2_d)
+head(DEC.de_lfc2_d)
+dim(DEC.de_lfc2_d) #18990 genes have been processed   
+
+plotMD(LR_lfc2$DE_d, status=DEC.de_lfc2_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc2_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc2_d.pdf", width=10,height=7)
+plotSmear(LR_lfc2$DE_d, de.tags = rownames(LR_lfc2$DE_d$table)[which(LR_lfc2$DE_d$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc2_d,  file='../results/DE_salmon/lfc2_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_lfc2$DE_h$table) # 15608 total genes
+
+sigReg_lfc2_h <- LR_lfc2$DE_h$table[DEC.de_lfc2_h>0 | DEC.de_lfc2_h<0,]
+sigReg_lfc2_h <- sigReg_lfc2_h[order(sigReg_lfc2_h$logFC, decreasing=TRUE),]
+dim(sigReg_lfc2_h) # --- significant genes (FDR < 0.05)
+
+sigUpReg_lfc2_h <- LR_lfc2$DE_h$table[DEC.de_lfc2_h>0 ,]
+sigUpReg_lfc2_h <- sigUpReg_lfc2_h[order(sigUpReg_lfc2_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc2_h) # --- upregulated genes
+head(sigUpReg_lfc2_h)
+
+sigDownReg_lfc2_h <- LR_lfc2$DE_h$table[DEC.de_lfc2_h<0,]
+sigDownReg_lfc2_h <- sigDownReg_lfc2_h[order(sigDownReg_lfc2_h$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc2_h)
+dim(sigDownReg_lfc2_h) # --- downregulated genes
+
+#export data
+upreg_lfc2_h <- rownames(sigUpReg_lfc2_h)
+write(upreg_lfc2_h, file="../results/DE_salmon/maize_lfc2_upreg_h.txt")
+write.csv(sigUpReg_lfc2_h, file="../results/DE_salmon/maize_lfc2_upreg_TABLE_h.csv")
+
+downreg_lfc2_h <- rownames(sigDownReg_lfc2_h)
+write(downreg_lfc2_h,file="../results/DE_salmon/maize_lfc2_downreg_h.txt")
+write.csv(sigDownReg_lfc2_h, file="../results/DE_salmon/maize_lfc2_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_lfc2$DE_d$table) # 18990 total genes
+
+sigReg_lfc2_d <- LR_lfc2$DE_d$table[DEC.de_lfc2_d>0 | DEC.de_lfc2_d<0,]
+sigReg_lfc2_d <- sigReg_lfc2_d[order(sigReg_lfc2_d$logFC, decreasing=TRUE),]
+dim(sigReg_lfc2_d) # 0 significant genes (FDR < 0.05)
+
+sigUpReg_lfc2_d <- LR_lfc2$DE_d$table[DEC.de_lfc2_d>0 ,]
+sigUpReg_lfc2_d <- sigUpReg_lfc2_d[order(sigUpReg_lfc2_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc2_d) # 0 upregulated genes
+head(sigUpReg_lfc2_d)
+
+sigDownReg_lfc2_d <- LR_lfc2$DE_d$table[DEC.de_lfc2_d<0,]
+sigDownReg_lfc2_d <- sigDownReg_lfc2_d[order(sigDownReg_lfc2_d$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc2_d)
+dim(sigDownReg_lfc2_d) # 0 downregulated genes
+
+#export data
+upreg_lfc2_d <- rownames(sigUpReg_lfc2_d)
+write(upreg_lfc2_d, file="../results/DE_salmon/maize_lfc2_upreg_d.txt")
+write.csv(sigUpReg_lfc2_d, file="../results/DE_salmon/maize_lfc2_upreg_TABLE_d.csv")
+
+downreg_lfc2_d <- rownames(sigDownReg_lfc2_d)
+write(downreg_lfc2_d,file="../results/DE_salmon/maize_lfc2_downreg_d.txt")
+write.csv(sigDownReg_lfc2_d, file="../results/DE_salmon/maize_lfc2_downreg_TABLE_d.csv")
+```
+
+
+## DE with settings: lfc = 4 and p-value = 0.05 --> lfc4
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_lfc4 <- list() 
+
+## Heat
+LR_lfc4[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 4)
+LR_lfc4$DE_h$table$FDR <- p.adjust(LR_lfc4$DE_h$table$PValue, "BH")
+#head(LR_lfc4$DE_h)
+
+lfc4_DE_table_h <- LR_lfc4$DE_h$table
+head(lfc4_DE_table_h)
+
+## Drought
+LR_lfc4[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 4)
+LR_lfc4$DE_d$table$FDR <- p.adjust(LR_lfc4$DE_d$table$PValue, "BH")
+#head(LR_lfc4$DE_d)
+
+lfc4_DE_table_d <- LR_lfc4$DE_d$table
+head(lfc4_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+```{r}
+#lfc = 4 and p.value = 0.05
+## Heat
+DEC.de_lfc4_h <- decideTestsDGE(LR_lfc4$DE_h, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc4_h)
+head(DEC.de_lfc4_h)
+dim(DEC.de_lfc4_h) # 15608 genes have been processed
+plotMD(LR_lfc4$DE_h, status=DEC.de_lfc4_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc4_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc4_h.pdf", width=10,height=7)
+plotSmear(LR_lfc4$DE_h, de.tags = rownames(LR_lfc4$DE_h$table)[which(LR_lfc4$DE_h$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc4_h, file='../results/DE_salmon/lfc4_de_updown_h.csv')
+
+
+## Drought
+DEC.de_lfc4_d <- decideTestsDGE(LR_lfc4$DE_d, adjust.method = "BH", p.value = 0.05)
+summary(DEC.de_lfc4_d)
+head(DEC.de_lfc4_d)
+dim(DEC.de_lfc4_d) #18990 genes have been processed   
+
+plotMD(LR_lfc4$DE_d, status=DEC.de_lfc4_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_lfc4_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_lfc4_d.pdf", width=10,height=7)
+plotSmear(LR_lfc4$DE_d, de.tags = rownames(LR_lfc4$DE_d$table)[which(LR_lfc4$DE_d$table$FDR<0.05)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_lfc4_d,  file='../results/DE_salmon/lfc4_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_lfc4$DE_h$table) # 15608 total genes
+
+sigReg_lfc4_h <- LR_lfc4$DE_h$table[DEC.de_lfc4_h>0 | DEC.de_lfc4_h<0,]
+sigReg_lfc4_h <- sigReg_lfc4_h[order(sigReg_lfc4_h$logFC, decreasing=TRUE),]
+dim(sigReg_lfc4_h) # --- significant genes (FDR < 0.05)
+
+sigUpReg_lfc4_h <- LR_lfc4$DE_h$table[DEC.de_lfc4_h>0 ,]
+sigUpReg_lfc4_h <- sigUpReg_lfc4_h[order(sigUpReg_lfc4_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc4_h) # --- upregulated genes
+head(sigUpReg_lfc4_h)
+
+sigDownReg_lfc4_h <- LR_lfc4$DE_h$table[DEC.de_lfc4_h<0,]
+sigDownReg_lfc4_h <- sigDownReg_lfc4_h[order(sigDownReg_lfc4_h$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc4_h)
+dim(sigDownReg_lfc4_h) # --- downregulated genes
+
+#export data
+upreg_lfc4_h <- rownames(sigUpReg_lfc4_h)
+write(upreg_lfc4_h, file="../results/DE_salmon/maize_lfc4_upreg_h.txt")
+write.csv(sigUpReg_lfc4_h, file="../results/DE_salmon/maize_lfc4_upreg_TABLE_h.csv")
+
+downreg_lfc4_h <- rownames(sigDownReg_lfc4_h)
+write(downreg_lfc4_h,file="../results/DE_salmon/maize_lfc4_downreg_h.txt")
+write.csv(sigDownReg_lfc4_h, file="../results/DE_salmon/maize_lfc4_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_lfc4$DE_d$table) # 18990 total genes
+
+sigReg_lfc4_d <- LR_lfc4$DE_d$table[DEC.de_lfc4_d>0 | DEC.de_lfc4_d<0,]
+sigReg_lfc4_d <- sigReg_lfc4_d[order(sigReg_lfc4_d$logFC, decreasing=TRUE),]
+dim(sigReg_lfc4_d) # 0 significant genes (FDR < 0.05)
+
+sigUpReg_lfc4_d <- LR_lfc4$DE_d$table[DEC.de_lfc4_d>0 ,]
+sigUpReg_lfc4_d <- sigUpReg_lfc4_d[order(sigUpReg_lfc4_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_lfc4_d) # 0 upregulated genes
+head(sigUpReg_lfc4_d)
+
+sigDownReg_lfc4_d <- LR_lfc4$DE_d$table[DEC.de_lfc4_d<0,]
+sigDownReg_lfc4_d <- sigDownReg_lfc4_d[order(sigDownReg_lfc4_d$logFC, decreasing=FALSE),]
+head(sigDownReg_lfc4_d)
+dim(sigDownReg_lfc4_d) # 0 downregulated genes
+
+#export data
+upreg_lfc4_d <- rownames(sigUpReg_lfc4_d)
+write(upreg_lfc4_d, file="../results/DE_salmon/maize_lfc4_upreg_d.txt")
+write.csv(sigUpReg_lfc4_d, file="../results/DE_salmon/maize_lfc4_upreg_TABLE_d.csv")
+
+downreg_lfc4_d <- rownames(sigDownReg_lfc4_d)
+write(downreg_lfc4_d,file="../results/DE_salmon/maize_lfc4_downreg_d.txt")
+write.csv(sigDownReg_lfc4_d, file="../results/DE_salmon/maize_lfc4_downreg_TABLE_d.csv")
+```
+
+
+## DE with settings: lfc = 0 and p-value = 0.01 --> p01
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_p01 <- list() 
+
+## Heat
+LR_p01[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 0)
+LR_p01$DE_h$table$FDR <- p.adjust(LR_p01$DE_h$table$PValue, "BH")
+#head(LR_p01$DE_h)
+
+p01_DE_table_h <- LR_p01$DE_h$table
+head(p01_DE_table_h)
+
+## Drought
+LR_p01[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 0)
+LR_p01$DE_d$table$FDR <- p.adjust(LR_p01$DE_d$table$PValue, "BH")
+#head(LR_p01$DE_d)
+
+p01_DE_table_d <- LR_p01$DE_d$table
+head(p01_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+```{r}
+#lfc = 0 and p.value = 0.01
+## Heat
+DEC.de_p01_h <- decideTestsDGE(LR_p01$DE_h, adjust.method = "BH", p.value = 0.01)
+summary(DEC.de_p01_h)
+head(DEC.de_p01_h)
+dim(DEC.de_p01_h) # 15608 genes have been processed
+plotMD(LR_p01$DE_h, status=DEC.de_p01_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_p01_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_p01_h.pdf", width=10,height=7)
+plotSmear(LR_p01$DE_h, de.tags = rownames(LR_p01$DE_h$table)[which(LR_p01$DE_h$table$FDR<0.01)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_p01_h, file='../results/DE_salmon/p01_de_updown_h.csv')
+
+
+## Drought
+DEC.de_p01_d <- decideTestsDGE(LR_p01$DE_d, adjust.method = "BH", p.value = 0.01)
+summary(DEC.de_p01_d)
+head(DEC.de_p01_d)
+dim(DEC.de_p01_d) #18990 genes have been processed   
+
+plotMD(LR_p01$DE_d, status=DEC.de_p01_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_p01_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_p01_d.pdf", width=10,height=7)
+plotSmear(LR_p01$DE_d, de.tags = rownames(LR_p01$DE_d$table)[which(LR_p01$DE_d$table$FDR<0.01)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_p01_d,  file='../results/DE_salmon/p01_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_p01$DE_h$table) # 15608 total genes
+
+sigReg_p01_h <- LR_p01$DE_h$table[DEC.de_p01_h>0 | DEC.de_p01_h<0,]
+sigReg_p01_h <- sigReg_p01_h[order(sigReg_p01_h$logFC, decreasing=TRUE),]
+dim(sigReg_p01_h) # 6998 significant genes (FDR < 0.01)
+
+sigUpReg_p01_h <- LR_p01$DE_h$table[DEC.de_p01_h>0 ,]
+sigUpReg_p01_h <- sigUpReg_p01_h[order(sigUpReg_p01_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_p01_h) # 3417 upregulated genes
+head(sigUpReg_p01_h)
+
+sigDownReg_p01_h <- LR_p01$DE_h$table[DEC.de_p01_h<0,]
+sigDownReg_p01_h <- sigDownReg_p01_h[order(sigDownReg_p01_h$logFC, decreasing=FALSE),]
+head(sigDownReg_p01_h)
+dim(sigDownReg_p01_h) # 3581 downregulated genes
+
+#export data
+upreg_p01_h <- rownames(sigUpReg_p01_h)
+write(upreg_p01_h, file="../results/DE_salmon/maize_p01_upreg_h.txt")
+write.csv(sigUpReg_p01_h, file="../results/DE_salmon/maize_p01_upreg_TABLE_h.csv")
+
+downreg_p01_h <- rownames(sigDownReg_p01_h)
+write(downreg_p01_h,file="../results/DE_salmon/maize_p01_downreg_h.txt")
+write.csv(sigDownReg_p01_h, file="../results/DE_salmon/maize_p01_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_p01$DE_d$table) # 18990 total genes
+
+sigReg_p01_d <- LR_p01$DE_d$table[DEC.de_p01_d>0 | DEC.de_p01_d<0,]
+sigReg_p01_d <- sigReg_p01_d[order(sigReg_p01_d$logFC, decreasing=TRUE),]
+dim(sigReg_p01_d) # 0 significant genes (FDR < 0.01)
+
+sigUpReg_p01_d <- LR_p01$DE_d$table[DEC.de_p01_d>0 ,]
+sigUpReg_p01_d <- sigUpReg_p01_d[order(sigUpReg_p01_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_p01_d) # 0 upregulated genes
+head(sigUpReg_p01_d)
+
+sigDownReg_p01_d <- LR_p01$DE_d$table[DEC.de_p01_d<0,]
+sigDownReg_p01_d <- sigDownReg_p01_d[order(sigDownReg_p01_d$logFC, decreasing=FALSE),]
+head(sigDownReg_p01_d)
+dim(sigDownReg_p01_d) # 0 downregulated genes
+
+#export data
+upreg_p01_d <- rownames(sigUpReg_p01_d)
+write(upreg_p01_d, file="../results/DE_salmon/maize_p01_upreg_d.txt")
+write.csv(sigUpReg_p01_d, file="../results/DE_salmon/maize_p01_upreg_TABLE_d.csv")
+
+downreg_p01_d <- rownames(sigDownReg_p01_d)
+write(downreg_p01_d,file="../results/DE_salmon/maize_p01_downreg_d.txt")
+write.csv(sigDownReg_p01_d, file="../results/DE_salmon/maize_p01_downreg_TABLE_d.csv")
+```
+
+## DE with settings: lfc = 0 and p-value = 0.02 --> p02
+```{r}
+# Estimate the diferentially expressed (DE) genes for the heat and drought stress conditions compared with each control, respectively in each dataset.
+
+LR_p02 <- list() 
+
+## Heat
+LR_p02[["DE_h"]] <- glmTreat(fit_h, contrast = L_h[,"DE_h"], lfc = 0)
+LR_p02$DE_h$table$FDR <- p.adjust(LR_p02$DE_h$table$PValue, "BH")
+#head(LR_p02$DE_h)
+
+p02_DE_table_h <- LR_p02$DE_h$table
+head(p02_DE_table_h)
+
+## Drought
+LR_p02[["DE_d"]] <- glmTreat(fit_d, contrast = L_d[,"DE_d"], lfc = 0)
+LR_p02$DE_d$table$FDR <- p.adjust(LR_p02$DE_d$table$PValue, "BH")
+#head(LR_p02$DE_d)
+
+p02_DE_table_d <- LR_p02$DE_d$table
+head(p02_DE_table_d)
+```
+
+### Summary and MD plots (for each contrast) --> see documentation EdgeR.
+```{r}
+#lfc = 0 and p.value = 0.02
+## Heat
+DEC.de_p02_h <- decideTestsDGE(LR_p02$DE_h, adjust.method = "BH", p.value = 0.02)
+summary(DEC.de_p02_h)
+head(DEC.de_p02_h)
+dim(DEC.de_p02_h) # 15608 genes have been processed
+plotMD(LR_p02$DE_h, status=DEC.de_p02_h, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_p02_h.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_p02_h.pdf", width=10,height=7)
+plotSmear(LR_p02$DE_h, de.tags = rownames(LR_p02$DE_h$table)[which(LR_p02$DE_h$table$FDR<0.02)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_p02_h, file='../results/DE_salmon/p02_de_updown_h.csv')
+
+
+## Drought
+DEC.de_p02_d <- decideTestsDGE(LR_p02$DE_d, adjust.method = "BH", p.value = 0.02)
+summary(DEC.de_p02_d)
+head(DEC.de_p02_d)
+dim(DEC.de_p02_d) #18990 genes have been processed   
+
+plotMD(LR_p02$DE_d, status=DEC.de_p02_d, values=c(1,-1), col=c("red","blue"), legend="right", main ="")
+
+#png(file="../results/plots/MA_p02_d.png", width=10,height=7,units="in",res=800)
+#pdf(file="../results/plots/MA_p02_d.pdf", width=10,height=7)
+plotSmear(LR_p02$DE_d, de.tags = rownames(LR_p02$DE_d$table)[which(LR_p02$DE_d$table$FDR<0.02)])
+#dev.off()
+
+# export to csv: all genes with expression in heat or in drought with p-values etc
+write.csv(DEC.de_p02_d,  file='../results/DE_salmon/p02_de_updown_d.csv')
+```
+
+### Up and Down regulated genes
+```{r}
+#Heat
+dim(LR_p02$DE_h$table) # 15608 total genes
+
+sigReg_p02_h <- LR_p02$DE_h$table[DEC.de_p02_h>0 | DEC.de_p02_h<0,]
+sigReg_p02_h <- sigReg_p02_h[order(sigReg_p02_h$logFC, decreasing=TRUE),]
+dim(sigReg_p02_h) # --- significant genes (FDR < 0.02)
+
+sigUpReg_p02_h <- LR_p02$DE_h$table[DEC.de_p02_h>0 ,]
+sigUpReg_p02_h <- sigUpReg_p02_h[order(sigUpReg_p02_h$logFC, decreasing=TRUE),]
+dim(sigUpReg_p02_h) # --- upregulated genes
+head(sigUpReg_p02_h)
+
+sigDownReg_p02_h <- LR_p02$DE_h$table[DEC.de_p02_h<0,]
+sigDownReg_p02_h <- sigDownReg_p02_h[order(sigDownReg_p02_h$logFC, decreasing=FALSE),]
+head(sigDownReg_p02_h)
+dim(sigDownReg_p02_h) # --- downregulated genes
+
+#export data
+upreg_p02_h <- rownames(sigUpReg_p02_h)
+write(upreg_p02_h, file="../results/DE_salmon/maize_p02_upreg_h.txt")
+write.csv(sigUpReg_p02_h, file="../results/DE_salmon/maize_p02_upreg_TABLE_h.csv")
+
+downreg_p02_h <- rownames(sigDownReg_p02_h)
+write(downreg_p02_h,file="../results/DE_salmon/maize_p02_downreg_h.txt")
+write.csv(sigDownReg_p02_h, file="../results/DE_salmon/maize_p02_downreg_TABLE_h.csv")
+
+
+#Drought
+dim(LR_p02$DE_d$table) # 18990 total genes
+
+sigReg_p02_d <- LR_p02$DE_d$table[DEC.de_p02_d>0 | DEC.de_p02_d<0,]
+sigReg_p02_d <- sigReg_p02_d[order(sigReg_p02_d$logFC, decreasing=TRUE),]
+dim(sigReg_p02_d) # 0 significant genes (FDR < 0.02)
+
+sigUpReg_p02_d <- LR_p02$DE_d$table[DEC.de_p02_d>0 ,]
+sigUpReg_p02_d <- sigUpReg_p02_d[order(sigUpReg_p02_d$logFC, decreasing=TRUE),]
+dim(sigUpReg_p02_d) # 0 upregulated genes
+head(sigUpReg_p02_d)
+
+sigDownReg_p02_d <- LR_p02$DE_d$table[DEC.de_p02_d<0,]
+sigDownReg_p02_d <- sigDownReg_p02_d[order(sigDownReg_p02_d$logFC, decreasing=FALSE),]
+head(sigDownReg_p02_d)
+dim(sigDownReg_p02_d) # 0 downregulated genes
+
+#export data
+upreg_p02_d <- rownames(sigUpReg_p02_d)
+write(upreg_p02_d, file="../results/DE_salmon/maize_p02_upreg_d.txt")
+write.csv(sigUpReg_p02_d, file="../results/DE_salmon/maize_p02_upreg_TABLE_d.csv")
+
+downreg_p02_d <- rownames(sigDownReg_p02_d)
+write(downreg_p02_d,file="../results/DE_salmon/maize_p02_downreg_d.txt")
+write.csv(sigDownReg_p02_d, file="../results/DE_salmon/maize_p02_downreg_TABLE_d.csv")
+```
+
+Chen, 2016, From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline (https://f1000research.com/articles/5-1438):
+*"The p-values from glmTreat are larger than those from glmQLFTest, and the number of significantly DE genes is fewer, because it is testing an interval null hypothesis and requires stronger evidence for differential expression than does a conventional test. It provides greater specificity for identifying the most important genes with large fold changes"*
+
+
+
+# 3. GENE ONTHOLOGY ANALYSIS:
+We use the Dicots PLAZA version 5.0 (https://bioinformatics.psb.ugent.be/plaza/versions/plaza_v5_dicots/workbench/logon)
+
+We followed the protocol outlined in the book chapter.
+All experiments (txt files with down/upregulated genes) should be imported into the PLAZA workbench. There are four parameter settings: heat upregulated, heat downregulated, drought upregulated, and drought downregulated.
+
+Then, evaluate the GO functional enrichment using the following options:
+- significance: p-value cutoff 0.05 for significance and Bonferroni correction for multiple testing  
+- background model: species (A. thaliana full genome GO annotation)  
+- no filtering of the data  
+- Enrichment type: GO data from all sources, no IEA and ISO evidences  
+
+Show redundant items
+
+Export the resulting table as csv. 
+
+```{python3 engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3"}
+def create_dict(file):
+    with open(file) as fd:
+        dic = {}
+        head = False
+        for line in fd:
+            line = line.strip("\n")
+            if not head:
+                head = str(line)
+                continue
+            kv = line.split(",")
+            dic[kv[0]] = kv[1]
+    fd.close()
+
+    return head, dic
+
+def dict_to_file(head,dic,file):
+    with open(file,"w") as f:
+        f.write(str(head) + "\n")
+        for i in dic.keys():
+            f.write(i + "," + dic[i] + "\n")
+    f.close()
+    return file
+
+
+def select_data(raw_data,filters,file_name):
+
+    fields = filters.split(",")
+    order = []
+    caps = "_filtered_"
+    for i in fields:
+        caps += i[0]
+        if i in raw_data[0]:
+            order.append(raw_data[0].index(i))
+    filt_name = file_name.rstrip(".csv") + caps + ".csv"
+    print("%s has been created successfully." %filt_name)
+
+    with open(filt_name,"w") as fw:
+        for line in raw_data:
+            new_line = ""
+            for n in order:
+                new_line += line[n] + "\t"
+            new_line.rstrip("\t")
+            new_line += "\n"
+            fw.write(new_line)
+
+
+def plaza_filtering(plaza_file,dict_file,filters):
+
+    import os.path
+    import re
+    if not os.path.isfile(dict_file):
+        with open(dict_file,"w") as fh:
+            fh.write("")
+        fh.close()
+
+    head, GO_des = create_dict(dict_file)
+
+    with open(plaza_file) as fr:
+        fields = []
+        novel = []
+        header = True
+        for line in fr:
+            line = line.strip("\n")
+            line = line.replace('"','')
+            if header:
+                head = line.split(",")
+                fields.append(head)
+                #Identifier,Type,Log2-Enrichment Fold,P.Value,Subset Ratio,Description,Not Redundant
+                header = False
+                continue
+            descript = re.compile(r"(GO:.*)\%,\"?(.*)\"?,([01]$)").search(line)
+            data = descript.group(1).split(",")
+            ID = data[0]
+            desc = descript.group(2).strip('"')
+            redund = descript.group(3)
+            if ID not in GO_des.keys():
+                novel.append(ID)
+            GO_des[ID] = desc
+            data.append(desc)
+            data.append(redund)
+            fields.append(data)
+
+        if len(novel) > 0:
+            print("REFRESH: There has been added %i new GO to the file %s" %(len(novel),dict_file))
+    fr.close()
+    
+    if "P-Value" in fields[0]:
+      ind = fields[0].index("P-Value")
+      fields[0][ind] = "P.Value"
+      
+    dict_to_file("Identifier,Description",GO_des,dict_file)
+    select_data(fields,filters,plaza_file)
+
+    print("done")
+    return GO_des
+
+def trigger_filtering(path, filters):
+    import os
+    from os import listdir,getcwd
+
+    main_path = os.getcwd()
+
+
+    os.chdir(path)
+    #path = os.getcwd()
+
+    list_path = os.listdir(path)
+    list_path.sort()
+
+    for i in list_path:
+        if i.startswith("plaza_") and i.endswith("_h.csv"):
+          print(i)
+          GO_dict = plaza_filtering(i,"GO_description.csv",filters)
+
+
+    os.chdir(main_path)
+
+filters = "Identifier,Type,Description,Log2-Enrichment Fold,P.Value,Subset Ratio"
+trigger_filtering("/group/transreg/jopab/results/GO",filters)
+```
+
+```{bash}
+head ../results/GO/GO_description.csv
+```
+
+
+## We sort by the pvalue and the FC, respectively
+```{r}
+# The filtered files are sorted by p-value and fold change and a ranking is asigned to them
+library(stringr); library(readr)
+
+csv_list <- list.files(path="../results/GO", pattern="_filtered_ITDLPS.csv", full.names=TRUE)
+
+for (i in csv_list){
+  p = paste0(str_remove(i, ".csv"),"_pval.csv")
+  fc = paste0(str_remove(i, ".csv"),"_FC.csv")
+  bp = paste0(str_remove(i, ".csv"),"_BP.csv")
+  
+  if (file.exists(p)) {file.remove(p)}
+  if (file.exists(fc)) {file.remove(fc)}
+  if (file.exists(bp)) {file.remove(bp)}
+}
+
+for (i in csv_list){
+  x = paste0(str_remove(i, ".csv"),"_BP.csv")
+  
+  open_csv <- read.table(i, sep="\t", header=TRUE)[ -c(7) ]
+  
+  t <- c("BP","MF","CC")
+  open_csv$Type <- factor(open_csv$Type, levels = t)
+  open_csv <- open_csv[open_csv$Type == "BP",]
+  
+  
+  write.table(open_csv, file=x, quote=FALSE, sep='\t', row.names = FALSE)
+}
+
+csv_list_BP <- list.files(path="../results/GO", pattern="_filtered_ITDLPS_BP.csv", full.names=TRUE)
+#print(csv_list_BP)
+
+for (i in csv_list_BP){
+  
+  except_files = c("../results/GO/plaza_lfc4_down_h_filtered_ITDLPS_BP.csv")
+  if (is.element(i,except_files)){next}
+  
+  p = paste0(str_remove(i, "_BP.csv"),"_pval.csv")
+  fc = paste0(str_remove(i, "_BP.csv"),"_FC.csv")
+  
+  open_csv <- read.table(i, sep="\t", header=TRUE)[ -c(7) ]
+  
+  sort_pval <- open_csv[order(open_csv$"P.Value"),]
+  sort_pval$Ranking = seq.int(nrow(sort_pval))
+  sort_FC <- open_csv[order(-open_csv$"Log2.Enrichment.Fold"),]
+  sort_FC$Ranking = seq.int(nrow(sort_FC))
+  
+  
+  write.table(sort_pval, file=p, quote=FALSE, sep='\t', row.names = FALSE)
+  print(paste0("New file has been created:",p))
+  write.table(sort_FC, file=fc, quote=FALSE, sep='\t', row.names = FALSE)
+  print(paste0("New file has been created:",fc))
+}
+```
+
+
+
+## We add the number of genes per onthology to the sorted files
+```{python3 engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3"}
+def merge_df(GOdes_file, gene_files):
+    dic = {}
+    h = True
+    relevant_list = ["GO:0009408","GO:0009266","GO:0006950","GO:0050896","GO:0009628","GO:0034605","GO:0033554","GO:0009409","GO:0010286"]
+    
+    with open(GOdes_file,"r") as fd:
+        for line in fd:
+            if h:
+                header1 = line.rstrip("\n")
+                header1 = header1.split(",")
+                h = False
+                continue
+            line = line.rstrip("\n")
+            line = line.split(",", 1)
+            dic[line[0]] = line[1]
+    fd.close()
+    
+    for gene_FILE in gene_files:
+        z = 0
+        with open(gene_FILE,"r") as fg:
+            for line in fg:
+                if h:
+                    header2 = "Genes"
+                    h = False
+                    continue
+                line = line.rstrip("\n")
+                line = line.strip('"')
+                line = line.split('","')
+                if line[0] in dic.keys():
+                    l = dic[line[0]].split("\t")
+                    if len(l) == 1:
+                        GO = line[0]
+                        des = dic[line[0]]
+                        if GO in relevant_list:
+                          gen = str("(*) " + line[2])
+                        else:
+                          gen = line[2]
+                        #print(GO,des,gen)
+                        lis = des + "\t" + gen
+                        dic[GO] = lis
+                    elif len(l) == 2:
+                        continue
+                    else:
+                        continue
+            fg.close()
+            break
+            
+    
+
+    with open(GOdes_file[:-4]+"_genes.csv", "w") as fw:
+        fw.write("Identifier\tDescription\tGenes\n")
+        for i in dic.keys():
+            #print(i)
+            val = dic[i]
+            val = val.split("\t")
+            if len(val) == 2:
+                line = "%s\t%s\t%s\n" %(i,val[0],val[1])
+            else:
+                line = "%s\t%s\t\n" %(i,val[0])
+            fw.write(line)
+    fw.close()
+    #print(dic)
+
+    return (dic)
+
+
+
+def merge_df_end(dic, filtered_file):
+    T = []
+    with open(filtered_file,"r") as fr:
+        text = fr.readlines()
+        for line in text:
+            fields = line.split("\t")
+            T += [fields]
+    fr.close()
+    
+    header = T.pop(0)
+    FT = []
+    header.insert(6,"Genes")
+    new_header = ";".join(header)
+    FT.append(new_header)
+    
+    for line in T:
+        GO = line[0]
+        DG = dic[GO].split("\t")
+        if len(DG) == 2:
+          genes = DG[1]
+        else:
+          genes = "NA"
+          #print("\t*Add this file gene numbers from plaza:", filtered_file)
+        line.insert(6,genes)
+        new_line = ";".join(line)
+        FT.append(new_line)
+    
+    name = filtered_file[:-4] + "_NG.csv"
+    with open(name,"w") as fw:
+        for line in FT:
+            fw.write(line)
+    print("File %s has been created." %name)
+    fw.close()
+        
+
+
+def trigger_merge(path):
+    import os
+    from os import listdir,getcwd
+
+    main_path = os.getcwd()
+
+
+    os.chdir(path)
+    path_x = os.getcwd()
+    
+    list_path = os.listdir(path)
+    list_path.sort()
+    print(path_x)
+    
+    #print("Main:", main_path)
+    #print(path_x)
+    #print(list_path)
+    
+    
+    
+    gene_files = ["genes_GO_lfc0_down_h.csv", "genes_GO_lfc0_up_h.csv", "genes_GO_p02_up_h.csv", "genes_GO_p01_up_h.csv","genes_GO_lfc1_up_h.csv"]
+    GO_des_genes = merge_df("GO_description.csv", gene_files)
+    #print(GO_des_genes)
+    
+    for i in list_path:
+        
+        if i.startswith("plaza_") and i.endswith("_pval.csv"):
+          #print(i)
+          merge_df_end(GO_des_genes, i)
+          
+        elif i.startswith("plaza_") and i.endswith("_FC.csv"):
+          #print(i)
+          merge_df_end(GO_des_genes, i)
+        
+        else:
+            #print("\tNot procesed file:",i)
+            continue
+    
+    os.chdir(main_path)
+
+#gene_files = ["genes_GO_lfc0_down_h.csv", "genes_GO_lfc0_up_h.csv", "genes_GO_p02_up_h.csv"]
+#GO_des_genes = merge_df("/group/transreg/jopab/results/GO/GO_description.csv", gene_files)
+
+
+
+#merge_df_end(GO_des_genes, "plaza_lfc0_up_h_filtered_ITDLPS_pval.csv")
+trigger_merge("/group/transreg/jopab/results/GO")
+```
+
+
+
+
+## We take the top 10 GOs of each file to plot later
+```{bash}
+#!/bin/sh
+cd ../results/GO/
+
+cp relevant_GO.csv GO4plot_up_pval.csv
+
+for var in ls plaza*up*pval_NG.csv
+do
+   echo $var;
+   head -n 11 $var | tail -n-10 >> GO4plot_up_pval.csv;
+done
+
+cut  -d ';' -f 1-3,7-8 GO4plot_up_pval.csv | (sed -u 1q; sort -n -t ';' -k 5) > GO4plot_up_pval_V2.csv
+
+cd ../../src
+```
+
+Now we filter the reference genes we will use in the graph to sort them by p.value and delete duplicates. We fulfill with zeros rows those GO that doesn't appear in some files but we are interested in show in the grphic later.
+```{python3 engine.path="/software/shared/apps/x86_64/python/3.6.5/bin/python3"}
+def the_filter(file):
+  GO_list = []
+  T2 = []
+  with open(file,"r") as fr:
+    T = fr.readlines()
+    header = T.pop(0)
+    #print("REF:", header) #Identifier;Type;Description;Genes;Ranking
+    T2.append(header)
+    for line in T:
+      LINE = line.split(";")
+      if LINE[0] in GO_list:
+        continue
+      else:
+        GO_list.append(LINE[0])
+        T2.append(line)
+    
+  fr.close()
+  name = file[:-5] + "FINAL.csv" #GO4plot_up_pval_VFINAL.csv
+  with open(name,"w") as fw:
+    for line in T2:
+      fw.write(line)
+  fw.close()
+  return T2
+  
+
+def zero_filling(file,REF): #Identifier;Type;Description;Genes;Ranking
+  search = {}
+  with open(file,"r") as fr:
+    T = fr.readlines()
+    header = T.pop(0)
+    top_rank = len(T)
+    print("\n- Original number of GO in file %s: %i GO terms" %(file,top_rank))
+    for line in T:
+      LINE = line.split(";")
+      ID = LINE[0]
+      search[ID] = line
+    fr.close()
+      
+  name = file[:-4] + "_graph.csv"
+  REF_go = REF[1:] #we remove the header
+  counter = 0
+  with open(name,"w") as fw:
+    fw.write(header)
+    for line in REF_go:
+      LINE = line.split(";")
+      ID = LINE[0]
+      if ID in search.keys():
+        fw.write(search[ID])
+        counter += 1
+      else:
+        new = [LINE[0],LINE[1],LINE[2],"","","",LINE[3],""]
+        new_line = ";".join(new)
+        new_line += "\n"
+        fw.write(new_line)
+        counter += 1
+    fw.close()
+    
+    print("New file created succesfully:",name)
+    print("- NEW number of GO in file %s: %i GO terms" %(name,counter))
+        
+
+def filter_zero(path):
+    import os
+    from os import listdir,getcwd
+
+    main_path = os.getcwd()
+    os.chdir(path)
+    path_x = os.getcwd()
+    
+    list_path = os.listdir(path)
+    list_path.sort()
+    
+    end_list = the_filter("GO4plot_up_pval_V2.csv") #we create the list with the wanted GO to plot
+    #The file obtained is: GO4plot_up_pval_VFINAL.csv
+    print("REF length:",len(end_list))
+    
+    for i in list_path:
+        
+        if i.startswith("plaza_") and i.endswith("_up_h_filtered_ITDLPS_pval_NG.csv"):
+          print("Processing this file...", i)
+          zero_filling(i,end_list)
+        
+        else:
+            #print("\tNot procesed file:",i)
+            continue
+        
+    
+
+    os.chdir(main_path)
+    
+filter_zero("/group/transreg/jopab/results/GO")
+
+
+```
+
+
+```{bash}
+wc -l ../results/GO/*up_h_filtered_ITDLPS_BP.csv
+#substract one line to each value (wc) for the header
+```
+## SUMMARY:
+- lfc0: LFC = 0 and p-value = 0.05 -> 369 GO terms (BP) ranked
+- lfc1: LFC = 1 and p-value = 0.05 -> 92 GO terms (BP) ranked
+- lfc2: LFC = 2 and p-value = 0.05 -> 38 GO terms (BP) ranked
+- lfc4: LFC = 4 and p-value = 0.05 -> 17 GO terms (BP) ranked
+- p01: LFC = 0 and p-value = 0.01 -> 299 GO terms (BP) ranked
+- p02: LFC = 0 and p-value = 0.02 -> 317 GO terms (BP) ranked
+
+## We create a dataframe with the ref GO families we want to plot
+```{r}
+#Here we have the GO families in the p-value ranking that we want to plot
+REF <- read.table("../results/GO/GO4plot_up_pval_VFINAL.csv", sep=";", header=TRUE)
+REF$Ranking <- rownames(REF)
+REF$DesGO = paste0(REF$Genes, " genes - ",REF$Description," (",REF$Identifier,")")
+head(REF)
+```
+
+
+## Now read the table with the rank, p-value and parameter to create a plot. 
+```{r}
+setwd("/group/transreg/jopab/src")
+
+cond <- c("lfc0","lfc1","lfc2","lfc4","p01","p02")
+filtered_h_up <- list.files(path="../results/GO", pattern="_up_h_filtered_ITDLPS_pval_NG.csv", full.names=TRUE)
+filtered_h_down <- list.files(path="../results/GO", pattern="_down_h_filtered_ITDLPS_pval_NG.csv", full.names=TRUE)
+
+for (i in 1:6){
+  name <- paste("FILTERED_up_",cond[i],sep = "")
+  assign(name, read.table(filtered_h_up[i], sep=";", header=TRUE))
+}
+```
+
+
+## We prepare the data for the graph
+```{r}
+# import package
+library(reshape2)
+library(ggplot2)
+library(forcats)
+
+#import data
+cond <- c("lfc0","lfc1","lfc2","lfc4","p01","p02")
+list_h_up <- list.files(path="../results/GO", pattern="_up_h_filtered_ITDLPS_pval_NG_graph.csv", full.names=TRUE)
+list_h_down <- list.files(path="../results/GO", pattern="_down_h_filtered_ITDLPS_pval_NG_graph.csv", full.names=TRUE)
+
+for (i in 1:6){
+  name <- paste("DATA_up_",cond[i],sep = "")
+  assign(name, read.table(list_h_up[i], sep=";", header=TRUE))
+}
+
+# prepare the data
+# RankFactor=(1-((Ranking-1)/(nrows-1)))*100
+# we create the index for the ranking of the p-values
+DATA_up_lfc0$RankFactor = round((((DATA_up_lfc0$Ranking)/(nrow(FILTERED_up_lfc0))))*100,2)
+DATA_up_lfc1$RankFactor = round((((DATA_up_lfc1$Ranking)/(nrow(FILTERED_up_lfc1))))*100,2)
+DATA_up_lfc2$RankFactor = round((((DATA_up_lfc2$Ranking)/(nrow(FILTERED_up_lfc2))))*100,2)
+DATA_up_lfc4$RankFactor = round((((DATA_up_lfc4$Ranking)/(nrow(FILTERED_up_lfc4))))*100,2)
+DATA_up_p01$RankFactor = round((((DATA_up_p01$Ranking)/(nrow(FILTERED_up_p01))))*100,2)
+DATA_up_p02$RankFactor = round((((DATA_up_p02$Ranking)/(nrow(FILTERED_up_p02))))*100,2)
+
+#We create the x-axis labels for the graph
+DATA_up_lfc0$DesGO = c(REF$DesGO)
+DATA_up_lfc1$DesGO = c(REF$DesGO)
+DATA_up_lfc2$DesGO = c(REF$DesGO)
+DATA_up_lfc4$DesGO = c(REF$DesGO)
+DATA_up_p01$DesGO = c(REF$DesGO)
+DATA_up_p02$DesGO = c(REF$DesGO)
+
+# reshape the data to fit ggplot
+DATA_up_lfc0$Condition <- rep(c("Log2(FC) > 0"),each=nrow(DATA_up_lfc0))
+DATA_up_lfc1$Condition <- rep(c("Log2(FC) > 1"),each=nrow(DATA_up_lfc1))
+DATA_up_lfc2$Condition <- rep(c("Log2(FC) > 2"),each=nrow(DATA_up_lfc2))
+DATA_up_lfc4$Condition <- rep(c("Log2(FC) > 4"),each=nrow(DATA_up_lfc4))
+DATA_up_p01$Condition <- rep(c("P-value < 0.01"),each=nrow(DATA_up_p01))
+DATA_up_p02$Condition <- rep(c("P-value < 0.02"),each=nrow(DATA_up_p02))
+
+matrix_all <- rbind(DATA_up_lfc0, DATA_up_lfc1, DATA_up_lfc2, DATA_up_lfc4, DATA_up_p01, DATA_up_p02)
+
+# draw the plot
+GO_plot <- ggplot(data = matrix_all,aes(x = Condition, y = reorder(DesGO, -RankFactor))) +  # use the data 
+  ggtitle("Upregulated Gene Onthology families (GO) in Zea mays B73 under heat stress") +
+  xlab("EdgeR filtering parameters") +
+  ylab("Gene Onthology families (GO)") +
+  geom_point(aes(Condition, DesGO, size = RankFactor, color = Log2.Enrichment.Fold)) +
+  scale_color_gradient(low="blue", high="red") + # defined the color/"scale_fill_gradient2" can set three color
+  labs(color = "Log2(Fold Change)", size = "P-Value ranking position") + # rename the legend
+  scale_size(breaks = c(1,25,50,75,100), range = c(6,1)) + # "breaks" to set cutoff
+  theme(panel.background = element_blank(),plot.title = element_text(hjust = 0.5), axis.text.x=element_text(angle = 30, , vjust = 1, hjust=1),
+      panel.grid.major = element_line(colour = "grey93"),
+      panel.border = element_rect(colour="grey",fill=NA))
+GO_plot
+ggsave("../results/plots/FINAL_GO_plot_up_h.png", height = 6, width = 12)
+ggsave("../results/plots/FINAL_GO_plot_up_h.pdf", height = 6, width = 12)
+dev.off()
+GO_plot
+```
+
+
+
+
+
